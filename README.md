@@ -14,7 +14,8 @@
 
 | 文件 | 作用 |
 |---|---|
-| `wxds-desktop/installer2/微信读书透明版 Setup 1.0.0.exe` | **安装包（发给别人的就是这个文件）** |
+| GitHub [Releases](https://github.com/qwer10963875-cmd/weread-transparent/releases) | **安装包在线下载页**（`WeRead-Transparent-Setup-1.0.0.exe`，约 76MB） |
+| `wxds-desktop/installer2/微信读书透明版/微信读书透明版 Setup 1.0.0.exe` | 本地安装包文件（直接发给别人的就是这个） |
 | `wxds-desktop/dist/微信读书透明版-win32-x64/微信读书透明版.exe` | 便携版主程序（双击即用，整个文件夹可拷走便携运行） |
 | `桌面版效果预览.png` | 实测截图（灰字浮于下层界面上） |
 | `wxds-desktop/main.js` `preload.js` `inject.js` | 源码（Electron 主进程 / 桥接 / 页面注入） |
@@ -22,7 +23,8 @@
 
 ### 分发给别人：安装包
 
-把 **`wxds-desktop/installer2/微信读书透明版 Setup 1.0.0.exe`**（约 76MB，单文件）发给对方即可，无需其它任何文件。
+- **在线（推荐）**：让对方打开仓库 [Releases 页](https://github.com/qwer10963875-cmd/weread-transparent/releases)，下载 `WeRead-Transparent-Setup-1.0.0.exe`（约 76MB）
+- **离线**：把 **`wxds-desktop/installer2/微信读书透明版/微信读书透明版 Setup 1.0.0.exe`**（约 76MB，单文件）直接发给对方即可，无需其它任何文件
 
 - **安装体验**：双击 → 可选安装目录（默认 `%LOCALAPPDATA%\Programs\weread-transparent-desktop`）→ 自动创建桌面和开始菜单快捷方式，**不需要管理员权限**
 - **首次运行可能弹 SmartScreen**「Windows 已保护你的电脑」——这是因为安装包没有购买代码签名证书，点 **「更多信息」→「仍要运行」** 即可，属正常现象
