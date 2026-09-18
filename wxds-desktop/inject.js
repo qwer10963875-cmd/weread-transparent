@@ -1,0 +1,648 @@
+/* ============================================================
+ * 微信读书 · 透明层  inject.js
+ * ------------------------------------------------------------
+ * 同一份代码，三种运行环境：
+ *   1. Electron 桌面版（本仓库 wxds-desktop）——检测到 wxdsApp 桥，
+ *      额外获得：真·点击穿透 / 窗口置顶 / 拖动移动窗口 / 缩放手柄
+ *              / 最小化最大化关闭 / 全局快捷键
+ *   2. 浏览器扩展（weread-app/extension）——纯 CSS 改造
+ *   3. 演示页 demo.html 内嵌——同上，设置存 localStorage
+ *
+ * 注入到 https://weread.qq.com/* 后：
+ *   - 「透明模式」清空页面所有背景 → 窗口底面透出桌面/下层软件
+ *   - 正文变灰色（可调），字号/行距/阅读区宽度可调
+ *   - 隐藏微信读书自身的顶栏/工具栏/页脚
+ *   - 键盘 / 滚轮翻页（透明模式时）
+ * ============================================================ */
+(() => {
+  'use strict';
+
+  const ROOT_ID = 'wxds-root';
+  if (document.getElementById(ROOT_ID)) return;   // 防重复注入
+
+  /* Electron 桥（其它环境为 null） */
+  const APP = (typeof wxdsApp !== 'undefined' && wxdsApp && wxdsApp.isElectron) ? wxdsApp : null;
+
+  const GRAYS = ['#3a3a3a', '#4d4d4d', '#606060', '#808080',
+                 '#9a9a9a', '#b5b5b5', '#d0d0d0', '#ededed'];
+
+  /* ---------------- 默认设置 ---------------- */
+  const DEF = {
+    on:    false,          // 透明模式总开关
+    color: '#808080',      // 字体颜色
+    fs:    0,              // 字号 px（0 = 用微信读书自己的）
+    lh:    0,              // 行距（0 = 默认）
+    width: 0,              // 阅读区宽度 %（0 = 默认）
+    hideUI:  true,         // 透明时隐藏顶栏/工具栏/页脚
+    lock:  true,           // 防误触（页面级指针锁定）
+    glow:  true,           // 白色柔光描边
+    panel: true,           // 面板可见
+    mini:  false,          // 面板收起
+    pos:   null,           // 面板位置（浏览器模式浮动用）
+    onTop: true,           // [桌面版] 窗口置顶
+    clickThrough: false    // [桌面版] 点击穿透
+  };
+  let S = Object.assign({}, DEF);
+  let rt = null;
+  let host = null;
+  let sh = null;
+
+  const isReader = () =>
+    /\/web\/reader\//.test(location.pathname) || window.WXDS_DEMO === true;
+
+  /* ---------------- 存储 ---------------- */
+  function loadCfg(cb) {
+    let done = false;
+    const fallback = () => {
+      let v = null;
+      try { v = JSON.parse(localStorage.getItem('wxds-cfg')); } catch (e) {}
+      cb(Object.assign({}, DEF, v || {}));
+    };
+    try {
+      if (!chrome.storage || !chrome.storage.local) return fallback();
+      chrome.storage.local.get(['cfg'], r => {
+        if (done) return;
+        done = true;
+        cb(Object.assign({}, DEF, (r && r.cfg) || {}));
+      });
+      setTimeout(() => { if (!done) { done = true; fallback(); } }, 400);
+    } catch (e) { fallback(); }
+  }
+  function saveCfg() {
+    try { chrome.storage.local.set({ cfg: S }); } catch (e) {
+      try { localStorage.setItem('wxds-cfg', JSON.stringify(S)); } catch (e2) {}
+    }
+  }
+
+  /* ---------------- 注入到页面的 CSS ---------------- */
+  const PAGE_CSS = `
+/* ===== 透明模式：清空一切背景 ===== */
+html.wxds-on, html.wxds-on body { background: transparent !important; }
+html.wxds-on * {
+  background-color: transparent !important;
+  background-image: none !important;
+  box-shadow: none !important;
+}
+html.wxds-on .wr_readerBackground_opacity,
+html.wxds-on .wr_readerImage_opacity { opacity: 0 !important; }
+html.wxds-on ::-webkit-scrollbar { width: 0 !important; height: 0 !important; }
+
+/* ===== 隐藏微信读书自身界面 ===== */
+html.wxds-on.wxds-hideui .readerTopBar,
+html.wxds-on.wxds-hideui .readerControls,
+html.wxds-on.wxds-hideui .readerFooter,
+html.wxds-on.wxds-hideui .readerCatalog,
+html.wxds-on.wxds-hideui .readerNotePanel { display: none !important; }
+
+/* ===== 灰色文字 ===== */
+html.wxds-on .readerChapterContent,
+html.wxds-on .readerChapterContent p,
+html.wxds-on .readerChapterContent span,
+html.wxds-on .readerChapterContent h1,
+html.wxds-on .readerChapterContent h2,
+html.wxds-on .readerChapterContent h3,
+html.wxds-on [class*="chapterContent"] p,
+html.wxds-on [class*="chapterContent"] span {
+  color: var(--wxds-color, #808080) !important;
+}
+html.wxds-on.wxds-glow .readerChapterContent,
+html.wxds-on.wxds-glow .readerChapterContent p,
+html.wxds-on.wxds-glow .readerChapterContent span,
+html.wxds-on.wxds-glow [class*="chapterContent"] p,
+html.wxds-on.wxds-glow [class*="chapterContent"] span {
+  text-shadow: 0 0 2px rgba(255,255,255,.32), 0 1px 0 rgba(255,255,255,.16) !important;
+}
+
+/* ===== 字号 / 行距 / 阅读区宽度 ===== */
+html.wxds-fs .readerChapterContent,
+html.wxds-fs .readerChapterContent p,
+html.wxds-fs .readerChapterContent span,
+html.wxds-fs [class*="chapterContent"] p,
+html.wxds-fs [class*="chapterContent"] span {
+  font-size: var(--wxds-fs, 20px) !important;
+}
+html.wxds-lh .readerChapterContent,
+html.wxds-lh .readerChapterContent p,
+html.wxds-lh [class*="chapterContent"] p {
+  line-height: var(--wxds-lh, 1.8) !important;
+}
+html.wxds-w .app_content { width: var(--wxds-w, 80%) !important; max-width: none !important; }
+html.wxds-w .readerTopBar { max-width: calc(100vw - 140px) !important; }
+html.wxds-w .renderTargetContainer,
+html.wxds-w .renderTargetContent { width: 100% !important; max-width: none !important; }
+
+/* ===== 防误触（浏览器模式的页面级锁定） ===== */
+html.wxds-on.wxds-lock * { pointer-events: none !important; }
+
+/* ===== 桌面版窗口控件 ===== */
+#wxds-dragbar{
+  position:fixed;top:0;left:0;right:0;height:6px;z-index:2147483646;
+  -webkit-app-region:drag;cursor:move;
+}
+#wxds-grip{
+  position:fixed;right:0;bottom:0;width:22px;height:22px;z-index:2147483646;
+  display:flex;align-items:center;justify-content:center;
+  font-size:13px;color:rgba(120,120,125,.7);cursor:nwse-resize;
+  user-select:none;pointer-events:auto;line-height:1;
+}
+`;
+
+  /* ---------------- 面板样式（Shadow DOM 隔离） ---------------- */
+  const PANEL_CSS = `
+    .wx-panel{
+      width:296px;background:rgba(17,18,22,.94);color:#e8e8ea;
+      border:1px solid rgba(255,255,255,.14);border-radius:14px;
+      box-shadow:0 16px 44px rgba(0,0,0,.45);
+      font:12px/1.5 "Microsoft YaHei","PingFang SC","Segoe UI",sans-serif;
+      user-select:none;backdrop-filter:blur(12px);overflow:hidden;
+    }
+    .wx-hd{
+      display:flex;align-items:center;gap:7px;padding:9px 10px 9px 13px;
+      background:rgba(255,255,255,.05);cursor:move;
+    }
+    .wx-hd .dot{width:7px;height:7px;border-radius:50%;background:#4a9eff;box-shadow:0 0 8px #4a9eff}
+    .wx-hd .tt{font-weight:600;font-size:12.5px;letter-spacing:.5px}
+    .wx-hd .sp{flex:1}
+    button{
+      font:inherit;color:#e8e8ea;background:rgba(255,255,255,.08);
+      border:1px solid rgba(255,255,255,.14);border-radius:8px;
+      padding:6px 9px;cursor:pointer;transition:.14s;white-space:nowrap;
+    }
+    button:hover{background:rgba(255,255,255,.17)}
+    button:active{transform:translateY(1px)}
+    .ico{padding:3px 8px;font-size:13px;line-height:1}
+    .wx-bd{padding:11px 13px 13px;display:flex;flex-direction:column;gap:10px;
+      max-height:calc(100vh - 70px);overflow:auto}
+    .main{
+      width:100%;padding:9px;font-size:13px;font-weight:600;letter-spacing:.5px;
+      background:rgba(74,158,255,.18);border-color:rgba(74,158,255,.45);color:#bad6ff;
+    }
+    .main:hover{background:rgba(74,158,255,.3)}
+    .main.on{background:#3a7bd5;border-color:#3a7bd5;color:#fff}
+    .row{display:flex;gap:7px}
+    .half{flex:1}
+    .sec{border-top:1px solid rgba(255,255,255,.1);padding-top:9px;
+      display:flex;flex-direction:column;gap:7px}
+    .sec[data-electron]{display:none}
+    :host(.app) .sec[data-electron]{display:flex}
+    .lab{display:flex;align-items:center;gap:6px;font-size:11.5px;color:rgba(232,232,234,.65)}
+    .lab span:first-child{flex:1}
+    .lab b{color:#7ab4ff;font-weight:600;font-variant-numeric:tabular-nums;
+      min-width:44px;text-align:right}
+    .rst{padding:2px 7px;font-size:11px}
+    input[type=range]{
+      -webkit-appearance:none;appearance:none;width:100%;height:3px;border-radius:3px;
+      background:rgba(255,255,255,.18);outline:none;cursor:pointer;margin:2px 0 0;
+    }
+    input[type=range]::-webkit-slider-thumb{
+      -webkit-appearance:none;width:13px;height:13px;border-radius:50%;
+      background:#e8e8ea;border:2px solid #3a7bd5;cursor:pointer;
+    }
+    .sws{display:flex;gap:6px;flex-wrap:wrap}
+    .sw{width:24px;height:24px;border-radius:7px;cursor:pointer;border:2px solid transparent}
+    .sw:hover{border-color:rgba(255,255,255,.55)}
+    .sw.on{border-color:#3a7bd5;box-shadow:0 0 0 2px rgba(58,123,213,.35)}
+    .sw.custom{background:conic-gradient(#f66,#fc6,#6f6,#6cf,#96f,#f66)}
+    .chks label{display:flex;align-items:center;gap:7px;font-size:11.5px;
+      color:rgba(232,232,234,.75);cursor:pointer}
+    .chks input{accent-color:#3a7bd5}
+    .tip{font-size:10.5px;color:rgba(232,232,234,.42);line-height:1.7}
+    .fab{
+      width:38px;height:38px;border-radius:50%;font-size:15px;font-weight:600;
+      background:rgba(17,18,22,.9);border:1px solid rgba(255,255,255,.18);
+      box-shadow:0 6px 18px rgba(0,0,0,.4);display:none;opacity:.45;
+      transition:opacity .18s,transform .18s,background .14s;
+    }
+    .fab:hover{opacity:1;transform:scale(1.08)}
+    :host(.mini) .wx-panel{display:none}
+    :host(.hidden) .wx-panel{display:none}
+    :host(.mini) .fab,:host(.hidden) .fab{display:block}
+    .toast{
+      position:fixed;left:50%;bottom:34px;transform:translateX(-50%) translateY(8px);
+      background:rgba(17,18,22,.92);border:1px solid rgba(255,255,255,.16);
+      border-radius:9px;padding:8px 16px;font-size:12.5px;color:#e8e8ea;
+      letter-spacing:.4px;opacity:0;transition:.22s;pointer-events:none;white-space:nowrap;
+    }
+    .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+  `;
+
+  const PANEL_HTML = `
+<div class="wx-panel">
+  <div class="wx-hd">
+    <span class="dot"></span><span class="tt">微信读书 · 透明层</span><span class="sp"></span>
+    <button class="ico" data-act="collapse" title="收起">—</button>
+    <button class="ico" data-act="hide" title="隐藏（右上角小圆钮 / Alt+H 唤回）">×</button>
+  </div>
+  <div class="wx-bd">
+    <button class="main" data-act="toggle">开启透明模式</button>
+    <div class="row">
+      <button class="half" data-act="prev">◀ 上一页</button>
+      <button class="half" data-act="next">下一页 ▶</button>
+    </div>
+    <div class="sec" data-electron>
+      <div class="row">
+        <button class="half" data-act="min">— 最小化</button>
+        <button class="half" data-act="max">□ 最大化</button>
+        <button class="half" data-act="close">× 退出</button>
+      </div>
+      <div class="chks">
+        <label><input type="checkbox" data-k="onTop">窗口置顶</label>
+        <label><input type="checkbox" data-k="clickThrough">点击穿透（鼠标穿到下层软件）</label>
+      </div>
+    </div>
+    <div class="sec">
+      <div class="lab"><span>字号</span><b data-v="fs">默认</b><button class="rst" data-act="rstfs" title="恢复默认">↺</button></div>
+      <input type="range" min="14" max="40" step="1" data-k="fs">
+      <div class="lab"><span>行距</span><b data-v="lh">默认</b><button class="rst" data-act="rstlh" title="恢复默认">↺</button></div>
+      <input type="range" min="1.2" max="3" step="0.05" data-k="lh">
+      <div class="lab"><span>阅读区宽度</span><b data-v="width">默认</b><button class="rst" data-act="rstw" title="恢复默认">↺</button></div>
+      <input type="range" min="40" max="96" step="1" data-k="width">
+    </div>
+    <div class="sec">
+      <div class="lab"><span>字体颜色</span></div>
+      <div class="sws"></div>
+    </div>
+    <div class="sec chks">
+      <label><input type="checkbox" data-k="hideUI">隐藏顶栏 / 工具栏 / 页脚</label>
+      <label><input type="checkbox" data-k="lock">防误触（透明时锁定书页）</label>
+      <label><input type="checkbox" data-k="glow">白色柔光描边</label>
+    </div>
+    <div class="tip" data-tip></div>
+  </div>
+</div>
+<button class="fab" data-act="restore" title="展开面板（Alt+H）">☰</button>
+<div class="toast"></div>
+  `;
+
+  /* ---------------- 翻页 ---------------- */
+  function findPageButtons() {
+    const sels = ['.readerFooter_button', '.readerFooterButton', '.readerFooter button'];
+    for (const s of sels) {
+      const list = document.querySelectorAll(s);
+      if (list.length) return Array.prototype.slice.call(list);
+    }
+    return [];
+  }
+  function page(dir) {
+    const btns = findPageButtons();
+    if (btns.length) {
+      const txt = b => (b.textContent || '') + ' ' + (b.className || '');
+      let t = null;
+      if (dir > 0) t = btns.find(b => /下一|next|›|»/i.test(txt(b)));
+      else        t = btns.find(b => /上一|prev|‹|«/i.test(txt(b)));
+      if (!t) t = dir > 0 ? btns[btns.length - 1] : btns[0];
+      t.click();
+    } else {
+      const key = dir > 0 ? 'PageDown' : 'PageUp';
+      const code = dir > 0 ? 34 : 33;
+      document.dispatchEvent(new KeyboardEvent('keydown', {
+        key, code, keyCode: code, which: code, bubbles: true, cancelable: true
+      }));
+    }
+  }
+
+  /* ---------------- 状态应用 ---------------- */
+  function relayout() {
+    clearTimeout(rt);
+    rt = setTimeout(() => {
+      try { window.dispatchEvent(new Event('resize')); } catch (e) {}
+    }, 150);
+  }
+
+  function apply() {
+    const h = document.documentElement;
+    h.classList.toggle('wxds-on',     S.on);
+    h.classList.toggle('wxds-glow',   S.on && S.glow);
+    h.classList.toggle('wxds-hideui', S.hideUI);
+    h.classList.toggle('wxds-lock',   S.on && S.lock);
+    h.classList.toggle('wxds-fs',     S.fs > 0);
+    h.classList.toggle('wxds-lh',     S.lh > 0);
+    h.classList.toggle('wxds-w',      S.width > 0);
+
+    h.style.setProperty('--wxds-color', S.color);
+    if (S.fs > 0)    h.style.setProperty('--wxds-fs', S.fs + 'px');
+    if (S.lh > 0)    h.style.setProperty('--wxds-lh', String(S.lh));
+    if (S.width > 0) h.style.setProperty('--wxds-w', S.width + '%');
+
+    if (host) {
+      /* 面板隐藏时宿主保留：留一个半透明小圆钮作为常驻唤回入口 */
+      host.style.display = '';
+      host.classList.toggle('mini', !!S.mini && !!S.panel);
+      host.classList.toggle('hidden', !S.panel);
+    }
+
+    /* 桌面版：同步窗口状态 */
+    if (APP) {
+      APP.onTop(!!S.onTop);
+      APP.clickThrough(!!S.clickThrough);
+      APP.notifyTransparent(!!S.on);
+    }
+    syncUI();
+  }
+
+  function syncUI() {
+    if (!sh) return;
+    const main = sh.querySelector('.main');
+    if (main) {
+      main.textContent = S.on ? '✓ 透明模式已开启（点击关闭）' : '开启透明模式';
+      main.classList.toggle('on', S.on);
+    }
+    const setV = (k, txt) => {
+      const b = sh.querySelector('[data-v="' + k + '"]');
+      if (b) b.textContent = txt;
+    };
+    setV('fs',    S.fs > 0 ? S.fs + ' px' : '默认');
+    setV('lh',    S.lh > 0 ? Number(S.lh).toFixed(2) : '默认');
+    setV('width', S.width > 0 ? S.width + ' %' : '默认');
+    const rFs = sh.querySelector('input[data-k="fs"]');
+    if (rFs) rFs.value = S.fs > 0 ? S.fs : 20;
+    const rLh = sh.querySelector('input[data-k="lh"]');
+    if (rLh) rLh.value = S.lh > 0 ? S.lh : 1.8;
+    const rW = sh.querySelector('input[data-k="width"]');
+    if (rW) rW.value = S.width > 0 ? S.width : 80;
+    sh.querySelectorAll('.chks input').forEach(c => { c.checked = !!S[c.dataset.k]; });
+    sh.querySelectorAll('.sw').forEach(sw => {
+      sw.classList.toggle('on', (sw.dataset.c || '').toLowerCase() === S.color.toLowerCase());
+    });
+    const tip = sh.querySelector('[data-tip]');
+    if (tip) {
+      tip.innerHTML = APP
+        ? 'Alt+Shift+T 透明 · Alt+Shift+C 穿透 · Alt+Shift+H 面板<br>→ / 空格 / 滚轮 翻页 · ← 回退 · 顶部条拖动窗口 · 右下角缩放'
+        : 'Alt+T 透明 · Alt+P 防误触 · Alt+H 面板 · Alt+± 字号<br>→ / 空格 / 滚轮 翻页 · ← 回退（透明模式时生效）';
+    }
+  }
+
+  /* ---------------- toast ---------------- */
+  let toastTimer = null;
+  function toast(msg) {
+    if (!sh) return;
+    const t = sh.querySelector('.toast');
+    if (!t) return;
+    t.textContent = msg;
+    t.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => t.classList.remove('show'), 1500);
+  }
+
+  /* ---------------- 构建 ---------------- */
+  function injectPageCss() {
+    if (document.getElementById('wxds-page-css')) return;
+    const st = document.createElement('style');
+    st.id = 'wxds-page-css';
+    st.textContent = PAGE_CSS;
+    (document.head || document.documentElement).appendChild(st);
+  }
+
+  function buildPanel() {
+    host = document.createElement('div');
+    host.id = ROOT_ID;
+    if (APP) host.classList.add('app');
+    const hs = host.style;
+    hs.setProperty('position', 'fixed', 'important');
+    hs.setProperty('z-index', '2147483647', 'important');
+    hs.setProperty('pointer-events', 'auto', 'important');
+    if (!APP && S.pos && typeof S.pos.x === 'number') {
+      hs.setProperty('left', S.pos.x + 'px', 'important');
+      hs.setProperty('top', S.pos.y + 'px', 'important');
+    } else {
+      hs.setProperty('top', '14px', 'important');
+      hs.setProperty('right', '16px', 'important');
+    }
+
+    sh = host.attachShadow({ mode: 'open' });
+    const style = document.createElement('style');
+    style.textContent = PANEL_CSS;
+    const box = document.createElement('div');
+    box.innerHTML = PANEL_HTML;
+    sh.append(style, box);
+
+    (document.body || document.documentElement).appendChild(host);
+    buildSwatches();
+    wireEvents();
+
+    /* 桌面版专属：顶部拖拽条 + 右下角缩放手柄 */
+    if (APP) {
+      if (!document.getElementById('wxds-dragbar')) {
+        const bar = document.createElement('div');
+        bar.id = 'wxds-dragbar';
+        (document.body || document.documentElement).appendChild(bar);
+      }
+      if (!document.getElementById('wxds-grip')) {
+        const grip = document.createElement('div');
+        grip.id = 'wxds-grip';
+        grip.title = '拖动调整窗口大小';
+        grip.textContent = '⤡';
+        (document.body || document.documentElement).appendChild(grip);
+        grip.addEventListener('mousedown', e => {
+          e.preventDefault();
+          e.stopPropagation();
+          const sx = e.screenX, sy = e.screenY;
+          APP.bounds().then(b0 => {
+            if (!b0) return;
+            const mv = ev => {
+              APP.size(b0.width + ev.screenX - sx, b0.height + ev.screenY - sy);
+            };
+            const up = () => {
+              window.removeEventListener('mousemove', mv);
+              window.removeEventListener('mouseup', up);
+            };
+            window.addEventListener('mousemove', mv);
+            window.addEventListener('mouseup', up);
+          });
+        });
+      }
+    }
+  }
+
+  function buildSwatches() {
+    const wrap = sh.querySelector('.sws');
+    wrap.textContent = '';
+    GRAYS.forEach(c => {
+      const d = document.createElement('div');
+      d.className = 'sw';
+      d.dataset.c = c;
+      d.style.background = c;
+      d.title = c;
+      wrap.appendChild(d);
+    });
+    const cu = document.createElement('div');
+    cu.className = 'sw custom';
+    cu.title = '自定义颜色';
+    wrap.appendChild(cu);
+    const inp = document.createElement('input');
+    inp.type = 'color';
+    inp.value = S.color;
+    inp.style.cssText = 'position:absolute;left:-100px;top:-100px;opacity:0';
+    wrap.appendChild(inp);
+    inp.addEventListener('input', () => {
+      S.color = inp.value;
+      apply(); saveCfg();
+    });
+    cu.addEventListener('click', () => inp.click());
+  }
+
+  function wireEvents() {
+    /* 面板按钮 / 滑块 / 复选框（事件委托） */
+    sh.addEventListener('click', e => {
+      const act = e.target.closest('[data-act]');
+      if (!act) return;
+      switch (act.dataset.act) {
+        case 'toggle':
+          S.on = !S.on; apply(); saveCfg();
+          toast(S.on ? '透明模式已开启' : '已恢复微信读书原样');
+          break;
+        case 'prev': page(-1); break;
+        case 'next': page(1);  break;
+        case 'collapse':
+          S.mini = !S.mini; apply(); saveCfg(); break;
+        case 'hide':
+          S.panel = false; apply(); saveCfg();
+          toast('面板已隐藏 · 点右上角小圆钮或 Alt+H 唤回');
+          break;
+        case 'restore':
+          S.panel = true; S.mini = false; apply(); saveCfg();
+          break;
+        case 'rstfs': S.fs = 0;    apply(); relayout(); saveCfg(); break;
+        case 'rstlh': S.lh = 0;    apply(); relayout(); saveCfg(); break;
+        case 'rstw':  S.width = 0; apply(); relayout(); saveCfg(); break;
+        case 'min':    if (APP) APP.win('min');    break;
+        case 'max':    if (APP) APP.win('max');    break;
+        case 'close':  if (APP) APP.win('close');  break;
+      }
+    });
+    sh.addEventListener('input', e => {
+      const k = e.target.dataset && e.target.dataset.k;
+      if (!k || e.target.type !== 'range') return;
+      S[k] = parseFloat(e.target.value);
+      apply(); relayout(); saveCfg();
+    });
+    sh.addEventListener('change', e => {
+      const k = e.target.dataset && e.target.dataset.k;
+      if (!k || e.target.type !== 'checkbox') return;
+      S[k] = e.target.checked;
+      apply(); saveCfg();
+      if (k === 'clickThrough') toast('点击穿透：' + (S.clickThrough ? '开（鼠标穿到下层软件）' : '关'));
+    });
+
+    /* 面板拖动：桌面版 = 拖动整个窗口；浏览器 = 面板浮动 */
+    const hd = sh.querySelector('.wx-hd');
+    hd.addEventListener('mousedown', e => {
+      if (e.target.closest('button')) return;
+      e.preventDefault();
+      if (APP) {
+        let last = { x: e.screenX, y: e.screenY };
+        const mv = ev => {
+          APP.move(ev.screenX - last.x, ev.screenY - last.y);
+          last = { x: ev.screenX, y: ev.screenY };
+        };
+        const up = () => {
+          window.removeEventListener('mousemove', mv);
+          window.removeEventListener('mouseup', up);
+        };
+        window.addEventListener('mousemove', mv);
+        window.addEventListener('mouseup', up);
+      } else {
+        const r = host.getBoundingClientRect();
+        const dx = e.clientX - r.left, dy = e.clientY - r.top;
+        host.style.setProperty('right', 'auto', 'important');
+        const mv = ev => {
+          const x = Math.max(0, Math.min(window.innerWidth - r.width,  ev.clientX - dx));
+          const y = Math.max(0, Math.min(window.innerHeight - 40, ev.clientY - dy));
+          host.style.setProperty('left', x + 'px', 'important');
+          host.style.setProperty('top',  y + 'px', 'important');
+        };
+        const up = () => {
+          window.removeEventListener('mousemove', mv);
+          window.removeEventListener('mouseup', up);
+          const b = host.getBoundingClientRect();
+          S.pos = { x: b.left, y: b.top };
+          saveCfg();
+        };
+        window.addEventListener('mousemove', mv);
+        window.addEventListener('mouseup', up);
+      }
+    });
+
+    /* 桌面版：点击穿透时，悬停在面板/把手/手柄上自动恢复可点 */
+    if (APP) {
+      document.addEventListener('mousemove', e => {
+        if (!S.clickThrough) return;
+        const t = e.target;
+        const over = !!(t && t.closest &&
+          t.closest('#wxds-root, #wxds-grip, #wxds-dragbar'));
+        APP.clickThrough(!over);
+      }, true);
+      /* 鼠标离开窗口时恢复穿透，避免卡在"可点"状态 */
+      window.addEventListener('mouseout', e => {
+        if (!e.relatedTarget && S.clickThrough) APP.clickThrough(true);
+      });
+      /* 主进程全局快捷键命令 */
+      APP.onCmd(cmd => {
+        if (cmd === 'toggle-transparent') { S.on = !S.on; apply(); saveCfg(); toast(S.on ? '透明模式已开启' : '已恢复原样'); }
+        else if (cmd === 'toggle-panel')  { S.panel = !S.panel; apply(); saveCfg(); }
+        else if (cmd === 'toggle-clickthrough') {
+          S.clickThrough = !S.clickThrough; apply(); saveCfg();
+          toast('点击穿透：' + (S.clickThrough ? '开（鼠标穿到下层软件）' : '关'));
+        }
+        else if (cmd === 'quit') { APP.win('close'); }
+      });
+    }
+
+    /* 键盘（页面内快捷键；桌面版全局快捷键由主进程派发） */
+    window.addEventListener('keydown', e => {
+      if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
+        const k = (e.key || '').toLowerCase();
+        if (k === 't') { e.preventDefault(); S.on = !S.on; apply(); saveCfg(); toast(S.on ? '透明模式已开启' : '已恢复原样'); }
+        else if (k === 'p') { e.preventDefault(); S.lock = !S.lock; apply(); saveCfg(); toast('防误触：' + (S.lock ? '开' : '关')); }
+        else if (k === 'h') { e.preventDefault(); S.panel = !S.panel; apply(); saveCfg(); }
+        else if (k === '=' || k === '+') { e.preventDefault(); stepFs(1); }
+        else if (k === '-') { e.preventDefault(); stepFs(-1); }
+        return;
+      }
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      const t = e.target;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+      if (!S.on || !isReader()) return;
+      if (e.key === 'ArrowRight' || e.key === 'PageDown' || e.key === ' ') { e.preventDefault(); page(1); }
+      else if (e.key === 'ArrowLeft' || e.key === 'PageUp') { e.preventDefault(); page(-1); }
+    }, true);
+
+    /* 滚轮翻页（透明模式时） */
+    window.addEventListener('wheel', e => {
+      if (!S.on || !isReader()) return;
+      const path = e.composedPath ? e.composedPath() : [];
+      for (const n of path) { if (n && n.id === ROOT_ID) return; }
+      if (Math.abs(e.deltaY) < 4) return;
+      e.preventDefault();
+      page(e.deltaY > 0 ? 1 : -1);
+    }, { passive: false, capture: true });
+  }
+
+  function stepFs(d) {
+    S.fs = (S.fs > 0 ? S.fs : 20) + d;
+    S.fs = Math.max(14, Math.min(40, S.fs));
+    apply(); relayout(); saveCfg();
+    toast('字号 ' + S.fs + ' px');
+  }
+
+  /* ---------------- 测试 / 调试接口 ---------------- */
+  window.__wxds = {
+    get cfg() { return JSON.parse(JSON.stringify(S)); },
+    get isDesktop() { return !!APP; },
+    set(k, v) {
+      if (!(k in DEF)) return;
+      S[k] = v; apply(); saveCfg();
+      if (k === 'fs' || k === 'lh' || k === 'width') relayout();
+    },
+    toggle() { S.on = !S.on; apply(); saveCfg(); return S.on; },
+    page
+  };
+
+  /* ---------------- 启动 ---------------- */
+  injectPageCss();
+  loadCfg(cfg => {
+    S = cfg;
+    buildPanel();
+    apply();
+  });
+})();

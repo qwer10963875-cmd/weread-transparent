@@ -1,0 +1,24 @@
+appId: cn.wxds.weread-transparent
+productName: 微信读书透明版
+directories:
+  output: installer2
+files:
+  - main.js
+  - preload.js
+  - inject.js
+  - icon.png
+  - icon.ico
+  - package.json
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  icon: icon.ico
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: 微信读书透明版

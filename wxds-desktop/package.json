@@ -1,0 +1,17 @@
+{
+  "name": "weread-transparent-desktop",
+  "productName": "微信读书透明版",
+  "version": "1.0.0",
+  "description": "微信读书网页版桌面化：完整功能 + 可登录 + 底面透明",
+  "main": "main.js",
+  "author": "wxds",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^26.15.3",
+    "electron-packager": "^17.1.2"
+  }
+}

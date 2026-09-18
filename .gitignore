@@ -1,0 +1,28 @@
+# ===== 本地隐私数据（绝不上传：含微信读书登录 Cookie）=====
+wxds-desktop/weread-profile/
+tools/.shot-profile/
+.chrome-profile/
+weread-app/.profile/
+
+# ===== WorkBuddy 会话/临时数据 =====
+.workbuddy/
+.tmp-test/
+
+# ===== 依赖与构建产物（可重建，体积大）=====
+node_modules/
+wxds-desktop/dist/
+wxds-desktop/release/
+wxds-desktop/installer/
+wxds-desktop/installer2/
+
+# ===== 大体积二进制（安装包走 GitHub Release 分发）=====
+*.exe
+*.asar
+*.blockmap
+*.dll
+*.pak
+
+# ===== 系统杂项 =====
+desktop.ini
+Thumbs.db
+.DS_Store
